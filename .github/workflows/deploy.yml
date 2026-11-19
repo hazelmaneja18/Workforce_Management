@@ -1,0 +1,52 @@
+name: Deploy Workforce Management
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build site (secrets are written only into the deployed copy)
+        env:
+          FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+          FIREBASE_AUTH_DOMAIN: ${{ secrets.FIREBASE_AUTH_DOMAIN }}
+          FIREBASE_DATABASE_URL: ${{ secrets.FIREBASE_DATABASE_URL }}
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
+          REQUIRE_SIGN_IN: ${{ vars.REQUIRE_SIGN_IN || 'false' }}
+        run: |
+          mkdir site
+          cp Workforce_management.html site/index.html
+          python3 - <<'PY'
+          import os
+          t = open('firebase-config.template.js', encoding='utf-8').read()
+          for k in ['FIREBASE_API_KEY','FIREBASE_AUTH_DOMAIN','FIREBASE_DATABASE_URL','FIREBASE_PROJECT_ID','FIREBASE_APP_ID','REQUIRE_SIGN_IN']:
+              v = os.environ.get(k, '')
+              if not v: raise SystemExit('Missing secret/variable: ' + k)
+              t = t.replace('__' + k + '__', v)
+          open('site/firebase-config.js', 'w', encoding='utf-8').write(t)
+          PY
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4
