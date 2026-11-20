@@ -1219,8 +1219,8 @@ async function clearAttendanceLogs(){
 }
 
 function addDaysToDateStr(dateStr, n){
-  const d = new Date(dateStr+'T00:00:00');
-  d.setDate(d.getDate()+n);
+  const d = new Date(dateStr+'T00:00:00Z');          // work in UTC so the day never shifts with the viewer's timezone
+  d.setUTCDate(d.getUTCDate()+n);
   return d.toISOString().slice(0,10);
 }
 // Groups a sorted list of unique "YYYY-MM-DD" absence dates into consecutive-day
@@ -2413,7 +2413,8 @@ function renderOnsiteTrendCard(kind){
     const key = lk(kind, emp.empName);
     const open = expandedRows.has(key);
     const notesN = notesFor(kind, emp.empName).length;
-    const sub = policy.level===1 && policy.onsitePeriod ? `<div class="status-sub">until ${fmtDate(policy.onsitePeriod.end)}</div>` : (policy.canOverride ? `<div class="status-sub need">needs onsite notice</div><div class="status-sub">last ${fmtShortDate(lastEvent)} \u00b7 onsite until ${fmtShortDate(onsiteUntil(kind, policy, lastEvent))}</div>` : '');
+    const waivedNow = !!(cur && cur.waived && policy.overridden);
+    const sub = waivedNow ? `<div class="status-sub">waived \u00b7 last offence ${fmtShortDate(cur.end)}</div>` : policy.level===1 && policy.onsitePeriod ? `<div class="status-sub">until ${fmtDate(policy.onsitePeriod.end)}</div>` : (policy.canOverride ? `<div class="status-sub need">needs onsite notice</div><div class="status-sub">last ${fmtShortDate(lastEvent)} \u00b7 onsite until ${fmtShortDate(onsiteUntil(kind, policy, lastEvent))}</div>` : '');
     const spark = renderAbsenceSparkline(counts, yearMonths, instancesPerMonth.map(x=> isAtt ? x : describeLateInstances(x)), isAtt ? undefined : 'No tardiness');
     return `<tr class="emp-row ${open?'open':''}" data-row-key="${esc(key)}">
       <td class="emp-name">${esc(toTitleCaseName(emp.empName))}</td>
@@ -2421,7 +2422,7 @@ function renderOnsiteTrendCard(kind){
       ${cells}
       <td class="num total">${emp.total}</td>
       <td class="spark">${spark}</td>
-      <td><span class="badge ${badgeClass}">${esc(policy.label)}</span>${sub}</td>
+      <td><span class="badge ${badgeClass}">${esc(waivedNow ? 'OK (Waived)' : policy.label)}</span>${sub}</td>
       <td style="text-align:right;"><button type="button" class="btn ghost sm manage-btn" data-toggle-row="${esc(key)}">${open?'Close':'Manage'}${notesN?` <span class="count-pill" title="${notesN} saved note${notesN===1?'':'s'} for this employee">${NOTE_ICON} ${notesN}</span>`:''}</button></td>
     </tr>
     <tr class="detail-row ${open?'open':''}" data-detail-for="${esc(key)}"><td colspan="${2+12+4}">${renderOnsiteDetail(kind, emp.empName, policy, cur, lastEvent)}</td></tr>`;
@@ -2460,7 +2461,7 @@ function renderOnsiteTrendCard(kind){
         </table>
       </div>
       <details class="how"><summary>How the onsite policy works</summary><p class="field-hint" style="margin-top:8px;">${policyText}</p>
-        <p class="field-hint" style="margin-top:8px;">Open <strong>Manage</strong> on any row to set the onsite dates and who approved them, and to keep dated notes. Each onsite requirement is kept permanently with its own notes \u2014 when a new violation happens, the earlier requirement and its notes stay on record under <strong>Previous onsite requirements</strong>. Uploading new attendance files never changes any of this. If a late/absence happens <strong>after</strong> a requirement ended, that counts as a new violation and a new requirement is needed \u2014 re-saving the old dates won\u2019t clear it. Use <strong>Delete</strong> to remove anything entered by mistake.</p></details>
+        <p class="field-hint" style="margin-top:8px;">Open <strong>Manage</strong> on any row to set the onsite dates and who approved them, and to keep dated notes. Each onsite requirement is kept permanently with its own notes \u2014 when a new violation happens, the earlier requirement and its notes stay on record under <strong>Previous onsite requirements</strong>. Uploading new attendance files never changes any of this. If a late/absence happens <strong>after</strong> a requirement ended, that counts as a new violation and a new requirement is needed \u2014 re-saving the old dates won\u2019t clear it. Use <strong>Waive onsite</strong> when no onsite is needed \u2014 it is kept in the history with the notes, and only violations <strong>after</strong> the last offence date are checked again. Use <strong>Delete</strong> to remove anything entered by mistake.</p></details>
       ` : emptyState('No employees to show', leadFilter ? 'Try \u201cAll Team Leads\u201d, or a different year.' : 'There is no data for this year yet.', null, null)}
     </div>
   </div>`;
@@ -2511,6 +2512,7 @@ function renderNoteItem(n){
   return `<li class="note-item"><div class="note-text">${esc(n.text)}</div><div class="note-meta"><span><strong>${esc(n.by||'Unknown')}</strong> \u00b7 ${esc(fmtStampShort(n.at))}</span><button type="button" class="note-del" data-del-note="${esc(n.id)}" title="Delete this note (e.g. added by mistake)">Delete</button></div></li>`;
 }
 function recStatusLabel(r, today){
+  if(r.waived) return r.status==='reopened' ? { text:'Waiver cancelled', cls:'dup' } : { text:'Waived', cls:'upd' };
   if(r.status==='reopened') return { text:'Reopened', cls:'dup' };
   if(r.end && r.end < today || r.completedAt) return { text:'Completed', cls:'new' };
   return { text:'In effect', cls:'upd' };
@@ -2537,7 +2539,10 @@ function renderOnsiteDetail(kind, emp, policy, cur, lastEvent){
     suggested = true;
   }
   const lastDone = [...prev].filter(r=>r.end && r.status!=='reopened').sort((a,b)=>(b.end||'').localeCompare(a.end||''))[0];
-  const callout = policy.canOverride ? `<div class="callout">${lastDone?`The last requirement (${fmtDate(lastDone.start)} \u2013 ${fmtDate(lastDone.end)}) is complete. `:''}${lastEvent?`The latest violation on file is <strong>${fmtDate(lastEvent)}</strong>${lastDone && lastEvent>lastDone.end?', which is <strong>after</strong> that period \u2014 so a <strong>new</strong> onsite requirement is needed. Saving the old dates again won\u2019t clear it.':'.'}`:''}${suggested?' The dates below are suggested from that violation \u2014 adjust them if needed.':''}</div>` : '';
+  const untilSug = lastEvent ? onsiteUntil(kind, policy, lastEvent) : '';
+  const stale = !!(suggested && untilSug && untilSug < today);
+  const prevOffence = lastDone ? (lastDone.waived ? (lastDone.lastOffence || lastDone.end) : lastDone.end) : '';
+  const callout = policy.canOverride ? `<div class="callout">${lastDone ? (lastDone.waived ? `Onsite was waived earlier (last offence then: <strong>${fmtDate(prevOffence)}</strong>). ` : `The last requirement (${fmtDate(lastDone.start)} \u2013 ${fmtDate(lastDone.end)}) is complete. `) : ''}${lastEvent ? `The latest violation on file is <strong>${fmtDate(lastEvent)}</strong>${lastDone && lastEvent>prevOffence ? `, which is <strong>after</strong> ${lastDone.waived?'that':'that period'} \u2014 so the policy is applied again from there and a <strong>new</strong> onsite requirement is needed.${lastDone.waived?'':' Saving the old dates again won\u2019t clear it.'}` : '.'}` : ''}${suggested ? ' The dates below are suggested from that violation \u2014 adjust them if needed.' : ''}${stale ? ' <strong>That period would already be over</strong> \u2014 if no onsite was needed for this violation, use <strong>Waive onsite</strong>.' : ''}</div>` : '';
   const canSet = policy.canOverride || policy.level===1;
   const approverValue = (curRec && curRec.approvedBy) || '';
   const leadList = rosterTeamLeads().map(t=>`<option value="${esc(t)}"></option>`).join('');
@@ -2557,8 +2562,15 @@ function renderOnsiteDetail(kind, emp, policy, cur, lastEvent){
       <div class="btn-row">
         <button type="button" class="btn brass sm" data-save-period ${(!periodStart||!periodEnd)?'disabled':''}>${policy.level===1?'Update period':'Save onsite requirement'}</button>
         ${policy.level===1?'<button type="button" class="btn ghost sm" data-complete-now>Mark completed today</button><button type="button" class="btn ghost sm" data-reopen>Reopen</button>':''}
+        <button type="button" class="btn ghost sm" data-waive title="Remove this onsite requirement — it stays in the history with the notes">Waive onsite</button>
         ${currentRecId?`<button type="button" class="btn ghost sm danger-text" data-del-record="${esc(currentRecId)}">Delete requirement</button>`:''}
       </div>`;
+  } else if(policy.overridden && curRec && curRec.waived){
+    reqBox = `
+      <div class="sec-title">Onsite waived</div>
+      <p class="why">${esc(curRec.requirement||'Onsite requirement')} was waived${curRec.waivedAt?` on ${esc(fmtStamp(curRec.waivedAt))}`:''}${curRec.waivedBy?` by <strong>${esc(curRec.waivedBy)}</strong>`:''}${curRec.approvedBy?`, approved by <strong>${esc(curRec.approvedBy)}</strong>`:''}.${curRec.waiveReason?` Reason: \u201c${esc(curRec.waiveReason)}\u201d.`:''}</p>
+      <div class="callout">Last offence on file when it was waived: <strong>${fmtDate(curRec.lastOffence||curRec.end)}</strong>. If this person violates again <strong>after</strong> that date, the same policy is checked again from that point.</div>
+      <div class="btn-row"><button type="button" class="btn ghost sm" data-reopen data-cancel-waiver>Cancel waiver</button><button type="button" class="btn ghost sm danger-text" data-del-record="${esc(currentRecId)}">Delete</button></div>`;
   } else if(policy.overridden && curRec){
     reqBox = `
       <div class="sec-title">Last onsite requirement</div>
@@ -2578,9 +2590,9 @@ function renderOnsiteDetail(kind, emp, policy, cur, lastEvent){
         const st = recStatusLabel(r, today);
         const rn = notes.filter(n=>n.recId===r.id || (r.id==='__legacy__' && !n.recId)).sort((a,b)=>(b.at||0)-(a.at||0));
         return `<details class="prev-rec">
-          <summary><span class="chip ${st.cls}">${st.text}</span> <strong>${esc(r.requirement||'Onsite requirement')}</strong> \u00b7 ${fmtDate(r.start)} \u2013 ${fmtDate(r.end)}${r.approvedBy?` \u00b7 approved by ${esc(r.approvedBy)}`:''}${rn.length?` \u00b7 ${rn.length} note${rn.length===1?'':'s'}`:''}</summary>
+          <summary><span class="chip ${st.cls}">${st.text}</span> <strong>${esc(r.requirement||'Onsite requirement')}</strong> \u00b7 ${r.waived ? `last offence ${fmtDate(r.lastOffence||r.end)}` : `${fmtDate(r.start)} \u2013 ${fmtDate(r.end)}`}${r.approvedBy?` \u00b7 approved by ${esc(r.approvedBy)}`:''}${rn.length?` \u00b7 ${rn.length} note${rn.length===1?'':'s'}`:''}</summary>
           <div class="prev-body">
-            <div class="rec-line">${r.reason?esc(r.reason)+'<br>':''}Recorded${r.savedBy?` by <strong>${esc(r.savedBy)}</strong>`:''}${r.savedAt?` on ${esc(fmtStamp(r.savedAt))}`:''}${r.completedAt?` \u00b7 marked completed by <strong>${esc(r.completedBy||'')}</strong>${r.completionApprovedBy?` (approved by ${esc(r.completionApprovedBy)})`:''} on ${esc(fmtStamp(r.completedAt))}`:''}${r.status==='reopened'?` \u00b7 reopened by <strong>${esc(r.reopenedBy||'')}</strong> on ${esc(fmtStamp(r.reopenedAt))}`:''}</div>
+            <div class="rec-line">${r.waived?`<strong>Waived</strong>${r.waivedBy?` by <strong>${esc(r.waivedBy)}</strong>`:''}${r.waivedAt?` on ${esc(fmtStamp(r.waivedAt))}`:''}${r.waiveReason?` \u2014 reason: \u201c${esc(r.waiveReason)}\u201d`:''}<br>`:''}${r.reason?esc(r.reason)+'<br>':''}Recorded${r.savedBy?` by <strong>${esc(r.savedBy)}</strong>`:''}${r.savedAt?` on ${esc(fmtStamp(r.savedAt))}`:''}${r.completedAt?` \u00b7 marked completed by <strong>${esc(r.completedBy||'')}</strong>${r.completionApprovedBy?` (approved by ${esc(r.completionApprovedBy)})`:''} on ${esc(fmtStamp(r.completedAt))}`:''}${r.status==='reopened'?` \u00b7 reopened by <strong>${esc(r.reopenedBy||'')}</strong> on ${esc(fmtStamp(r.reopenedAt))}`:''}</div>
             ${rn.length ? `<ul class="notes-list">${rn.map(renderNoteItem).join('')}</ul>` : '<p class="field-hint" style="margin:6px 0 0;">No notes were logged for this requirement.</p>'}
             <div class="btn-row"><button type="button" class="btn ghost sm danger-text" data-del-record="${esc(r.id)}">Delete this requirement</button></div>
           </div></details>`;
@@ -2672,7 +2684,8 @@ async function completeNowAction(btn){
 }
 async function reopenAction(btn){
   const info = panelInfo(btn); const { kind, emp } = info;
-  if(!confirm(`Reopen ${toTitleCaseName(emp)}\u2019s status so it reflects the attendance on file again? The earlier requirement stays in the history.`)) return;
+  const isWaiver = btn.hasAttribute('data-cancel-waiver');
+  if(!confirm(isWaiver ? `Cancel the waiver for ${toTitleCaseName(emp)}? Their status goes back to what the attendance on file says. The waiver stays in the history.` : `Reopen ${toTitleCaseName(emp)}\u2019s status so it reflects the attendance on file again? The earlier requirement stays in the history.`)) return;
   const by = await ensureUserName(); if(!by) return;
   const om = STATE[overrideMapName(kind)] || {};
   if(om[emp]){
@@ -2739,6 +2752,61 @@ async function deleteNoteAction(btn){
   if(ok) toast('Note deleted'); else toastRetry('Deleted here, but the save failed \u2014 tap to retry.');
 }
 
+function askWaive(o){
+  return new Promise(resolve=>{
+    const ov = document.createElement('div');
+    ov.className = 'modal-overlay';
+    ov.innerHTML = `<div class="modal"><h3>Waive onsite requirement</h3>
+      <p class="field-hint" style="margin:0 0 14px;">${o.level===1 ? 'This cancels the onsite requirement that is in effect.' : 'No onsite period will be set for this violation.'} It stays in the history together with the notes.${o.lastEvent ? ` The last offence on file is <strong>${esc(fmtDate(o.lastEvent))}</strong> \u2014 if they violate again <strong>after</strong> that date, the same policy is checked again from that point.` : ''}</p>
+      <label class="field-label">Reason for waiving</label>
+      <textarea id="wvReason" rows="3" placeholder="e.g. Absence was excused / leave was approved"></textarea>
+      <label class="field-label" style="margin-top:12px; display:block;">Approved by</label>
+      <input type="text" id="wvApprover" list="wvLeads" placeholder="Who approved the waiver?" autocomplete="off">
+      <datalist id="wvLeads">${rosterTeamLeads().map(t=>`<option value="${esc(t)}"></option>`).join('')}</datalist>
+      <div class="modal-actions"><button type="button" class="btn ghost" id="wvCancel">Cancel</button><button type="button" class="btn brass" id="wvOk">Waive onsite</button></div></div>`;
+    document.body.appendChild(ov);
+    const reason = ov.querySelector('#wvReason'), who = ov.querySelector('#wvApprover');
+    reason.focus();
+    const done = v=>{ ov.remove(); resolve(v); };
+    ov.querySelector('#wvOk').onclick = ()=>{
+      if(!reason.value.trim()){ reason.focus(); return; }
+      if(!who.value.trim()){ who.focus(); return; }
+      done({ reason:reason.value.trim(), approver:who.value.trim() });
+    };
+    ov.querySelector('#wvCancel').onclick = ()=>done(null);
+    ov.addEventListener('keydown', e=>{ if(e.key==='Escape') done(null); });
+  });
+}
+// Waive = no onsite for this violation. It is saved as a record (shown in the history with the notes) and the status
+// treats the LAST OFFENCE DATE as the cut-off: only violations after that date are checked again, with the normal policy.
+async function waiveOnsiteAction(btn){
+  const info = panelInfo(btn); const { kind, emp } = info;
+  const lastEvent = info.p.dataset.lastEvent || '';
+  const by = await ensureUserName(); if(!by) return;
+  const form = await askWaive({ level:info.level, lastEvent }); if(!form) return;
+  const key = lk(kind, emp), now = Date.now();
+  const cutoff = (lastEvent && lastEvent < todayIso()) ? lastEvent : todayIso();
+  const om = STATE[overrideMapName(kind)] = STATE[overrideMapName(kind)] || {};
+  STATE.onsiteRecords = STATE.onsiteRecords || {}; STATE.onsiteRecords[key] = STATE.onsiteRecords[key] || {};
+  STATE.onsiteNotes = STATE.onsiteNotes || {}; STATE.onsiteNotes[key] = STATE.onsiteNotes[key] || {};
+  const waiver = { status:'waived', waived:true, waiveReason:form.reason, waivedBy:by, waivedAt:now, approvedBy:form.approver, lastOffence:cutoff };
+  let rec;
+  if(info.level===1 && om[emp]){                       // an onsite requirement in effect is being cancelled
+    const id = ensureLegacyRecord(kind, emp);
+    rec = STATE.onsiteRecords[key][id];
+    Object.assign(rec, waiver);
+  } else {                                             // a new violation that needs no onsite
+    ensureLegacyRecord(kind, emp);
+    rec = { id:uid('onr'), kind, emp, requirement:info.label, reason:info.reason, start:cutoff, end:cutoff, savedBy:by, savedAt:now, ...waiver };
+    STATE.onsiteRecords[key][rec.id] = rec;
+    Object.values(STATE.onsiteNotes[key]).filter(n=>!n.recId).forEach(n=>{ n.recId = rec.id; n.req = rec.requirement; });   // the notes written so far join the waiver
+  }
+  om[emp] = { start:cutoff, end:cutoff, setAt:now, recId:rec.id, approvedBy:form.approver, waived:true };
+  expandedRows.add(key);
+  const ok = await saveState();
+  if(ok){ toast(`Onsite waived \u2014 approved by ${form.approver}`); render(); }
+  else toastRetry('Couldn\u2019t save the waiver \u2014 tap to try again.');
+}
 function attachTrendHandlers(){
   document.querySelectorAll('.js-trend-year').forEach(s=>s.addEventListener('change', ()=>{ trendYear = Number(s.value); render(); }));
   document.querySelectorAll('.js-trend-lead').forEach(s=>s.addEventListener('change', ()=>{
@@ -2764,6 +2832,7 @@ function attachTrendHandlers(){
   document.querySelectorAll('[data-save-period]').forEach(b=>b.addEventListener('click', ()=>saveOnsitePeriodAction(b)));
   document.querySelectorAll('[data-complete-now]').forEach(b=>b.addEventListener('click', ()=>completeNowAction(b)));
   document.querySelectorAll('[data-reopen]').forEach(b=>b.addEventListener('click', ()=>reopenAction(b)));
+  document.querySelectorAll('[data-waive]').forEach(b=>b.addEventListener('click', ()=>waiveOnsiteAction(b)));
   document.querySelectorAll('[data-add-note]').forEach(b=>b.addEventListener('click', ()=>addNoteAction(b)));
   document.querySelectorAll('[data-del-record]').forEach(b=>b.addEventListener('click', ()=>deleteRecordAction(b)));
   document.querySelectorAll('[data-del-note]').forEach(b=>b.addEventListener('click', ()=>deleteNoteAction(b)));
