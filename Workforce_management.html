@@ -356,6 +356,19 @@
   .lead-table tbody td{ border-bottom:1px solid var(--rule-soft); }
   .impact{ margin-top:16px; padding-top:14px; border-top:1px dashed var(--sand); }
   input[type=checkbox]{ width:16px; height:16px; accent-color:var(--burgundy); cursor:pointer; }
+  .name-link{ background:none; border:none; padding:0; font:inherit; font-weight:600; color:var(--ink-text); cursor:pointer; text-align:left; }
+  .name-link:hover{ color:var(--burgundy); text-decoration:underline; }
+  .modal.wide{ width:min(1040px,95vw); max-height:88vh; overflow:auto; }
+  .modal-head{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+  .hist-table{ width:100%; border-collapse:separate; border-spacing:0; margin-top:8px; }
+  .hist-table th, .hist-table td{ padding:10px 10px; vertical-align:top; border-bottom:1px solid var(--rule-soft); text-align:left; font-size:12.5px; }
+  .hist-table th{ font-size:10.5px; letter-spacing:0.08em; text-transform:uppercase; color:var(--slate-soft); }
+  .wfh-table{ min-width:1280px; }
+  .wfh-table td.emp-name, .wfh-table th:first-child{ min-width:230px; }
+  .wfh-table td:nth-child(2){ white-space:nowrap; }
+  .wfh-table input.wfh-edit[data-field="date"]{ min-width:145px; }
+  .wfh-table input.wfh-edit[data-field="email"]{ min-width:215px; }
+  .wfh-table input.wfh-edit[data-field="approvedBy"]{ min-width:140px; }
 </style>
 </head>
 <body>
@@ -429,6 +442,7 @@ let STATE = {
   onsiteNotes: {},
   wfhCampaigns: [],
   wfhPasses: {},
+  wfhHistory: {},
   roleNames: [],
   attendanceLogs: [],
   attendanceUploadMeta: null,
@@ -466,7 +480,7 @@ const REQUIRE_SIGN_IN = WFM_CFG.requireSignIn===true || WFM_CFG.requireSignIn===
 const cfgReady = c=>!!(c && c.databaseURL && c.apiKey && !/^__/.test(c.databaseURL) && !/^__/.test(c.apiKey));
 
 const LIST_KEYS = ['teamLeadNames','campaignNames','roleNames','wfhCampaigns'];
-const NESTED_MAPS = ['onsiteRecords','onsiteNotes','wfhPasses'];
+const NESTED_MAPS = ['onsiteRecords','onsiteNotes','wfhPasses','wfhHistory'];
 const SMALL_MAPS = ['attendancePolicyOverrides','attendanceNotes','tardinessPolicyOverrides','tardinessNotes'];
 const MAP_KEYS = SMALL_MAPS.concat(NESTED_MAPS);
 let FB = { ready:false, db:null, root:null, lastFlat:{}, error:'', denied:false };
@@ -713,6 +727,7 @@ function onRemoteChange(){
     if(el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)){ remoteTimer = setTimeout(tryRender, 2500); return; }
     lastDataSig = sig;
     cacheLocal();
+    if(typeof rolloverWfhPasses==='function' && rolloverWfhPasses()) saveState();
     render();
     setSaveStatus(null, 'Updated live at ' + nowStamp());
   }, 400);
@@ -1865,6 +1880,7 @@ function rememberUploader(inputId){
   return v;
 }
 function attachExtraHandlers(){
+  attachSummaryFilters();
   document.querySelectorAll('[data-impact-go]').forEach(b=>b.addEventListener('click', ()=>{
     if(b.dataset.impactGo==='attendance'){ attendanceActiveTab = 'trend'; setView('attendanceImport'); }
     else { tardinessActiveTab = 'trend'; setView('tardiness'); }
@@ -1927,6 +1943,10 @@ async function reconnectFirebase(){
   initialDone = true;
   updateUserChip();
   await migrateLegacyNotes();
+  if(rolloverWfhPasses()) await saveState();
+  { const roll = ()=>{ if(rolloverWfhPasses()){ saveState(); render(); } };
+    setInterval(roll, 15*60*1000);
+    document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) roll(); }); }
   lastDataSig = dataSig();
   document.getElementById('loading').style.display = 'none';
   render();
@@ -2440,6 +2460,37 @@ function renderOnsiteTrendCard(kind){
   </div>`;
 }
 
+/* ---- Team Lead filter + search for the monthly summary tabs ---- */
+const summaryLeadFilter = { attendance:'', tardiness:'' };
+const summarySearch = { attendance:'', tardiness:'' };
+function summaryLeadMatch(empName, filter){
+  if(!filter) return true;
+  const m = rosterMatchForAttendanceName(empName);
+  const lead = m ? m.teamLead : '';
+  return filter==='__unmatched__' ? !lead : lead===filter;
+}
+function summaryFilterBar(kind){
+  const f = summaryLeadFilter[kind];
+  return `<div class="trend-filters">
+    <div class="field"><label class="field-label">Team Lead</label><select id="${kind}LeadSel"><option value="">All Team Leads</option><option value="__unmatched__" ${f==='__unmatched__'?'selected':''}>Unmatched / Not on Roster</option>${rosterTeamLeads().map(t=>`<option value="${esc(t)}" ${f===t?'selected':''}>${esc(t)}</option>`).join('')}</select></div>
+    <div class="field"><label class="field-label">Search by Agent Name</label><input type="text" id="${kind}SearchInput" value="${esc(summarySearch[kind])}" placeholder="Start typing an agent\u2019s name\u2026"></div>
+  </div>`;
+}
+function attachSummaryFilters(){
+  ['attendance','tardiness'].forEach(kind=>{
+    const sel = document.getElementById(kind+'LeadSel');
+    if(sel) sel.addEventListener('change', ()=>{ summaryLeadFilter[kind] = sel.value; render(); });
+    const inp = document.getElementById(kind+'SearchInput');
+    const apply = ()=>{
+      const term = summarySearch[kind].trim().toLowerCase(); let vis = 0;
+      document.querySelectorAll(`#${kind}Table tbody tr[data-summary-row]`).forEach(r=>{
+        const ok = !term || (r.dataset.summarySearch||'').includes(term); r.style.display = ok ? '' : 'none'; if(ok) vis++;
+      });
+      const e = document.getElementById(kind+'SearchEmpty'); if(e) e.style.display = (vis===0 && document.getElementById(kind+'Table')) ? 'block' : 'none';
+    };
+    if(inp){ inp.addEventListener('input', ()=>{ summarySearch[kind] = inp.value; apply(); }); if(summarySearch[kind]) apply(); }
+  });
+}
 const NOTE_ICON = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M8 13h8M8 17h5"/></svg>';
 // "onsite until" always counts from the LAST time the person violated (2 weeks; 1 month for tardiness level 3; 60 days for attendance level 3)
 function onsiteUntil(kind, policy, last){
@@ -2754,6 +2805,121 @@ function wfhCampaignNames(){
 function wfhList(campaign){
   return Object.values((STATE.wfhPasses||{})[campaign]||{}).sort((a,b)=>(a.ord||0)-(b.ord||0) || a.name.localeCompare(b.name));
 }
+/* ---- WFH pass dates + history ---- */
+function localIso(d){ d = d || new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+// reads "10/26-10/30", "11/9 - 11/13", "10/26/2026-10/30/2026" or a single date; the year comes from the text, the email date, or today
+function parseWfhRange(dateText, emailText){
+  const t = String(dateText||''); if(!t.trim()) return null;
+  const re = /(\d{1,2})\s*\/\s*(\d{1,2})(?:\s*\/\s*(\d{4}|\d{2}))?/g; const p = []; let m;
+  while((m = re.exec(t))){
+    const mo = +m[1], d = +m[2]; if(mo<1 || mo>12 || d<1 || d>31) return null;
+    let y = m[3] ? +m[3] : null; if(y!==null && y<100) y += 2000;
+    p.push({ mo, d, y });
+  }
+  if(!p.length) return null;
+  const em = String(emailText||'').match(/\b(20\d{2})\b/);
+  const now = new Date();
+  let y0 = p[0].y || (em ? +em[1] : now.getFullYear());
+  if(!p[0].y && !em && (new Date(y0, p[0].mo-1, p[0].d) - now) > 183*86400000) y0 -= 1;   // "12/28" read in January = last year
+  const last = p[p.length-1];
+  let y1 = last.y || y0;
+  if(!last.y && (last.mo < p[0].mo || (last.mo===p[0].mo && last.d < p[0].d))) y1 = y0 + 1;   // 12/28-1/3
+  const iso = (y,mo,d)=>y+'-'+String(mo).padStart(2,'0')+'-'+String(d).padStart(2,'0');
+  return { start: iso(y0, p[0].mo, p[0].d), end: iso(y1, last.mo, last.d) };
+}
+function wfhHistoryId(rec){ return 'h_' + (djb2([rec.pass, rec.date||'', rec.email||'', rec.grantedAt||''].join('|'))>>>0).toString(36); }
+function wfhHistoryEntries(campaign, recId){
+  return Object.values((STATE.wfhHistory||{})[campaign+'|'+recId] || {}).sort((a,b)=>(b.endDate||'').localeCompare(a.endDate||'') || (b.archivedAt||0)-(a.archivedAt||0));
+}
+// Saves the pass to the agent's history (same id every time, so two people opening the page never create duplicates) and resets the agent to NO.
+function archiveWfhPass(campaign, rec, status, by){
+  const key = campaign+'|'+rec.id;
+  STATE.wfhHistory = STATE.wfhHistory || {}; STATE.wfhHistory[key] = STATE.wfhHistory[key] || {};
+  const range = parseWfhRange(rec.date, rec.email);
+  const id = wfhHistoryId(rec);
+  STATE.wfhHistory[key][id] = { id, campaign, agentId:rec.id, name:rec.name, pass:rec.pass, date:rec.date||'', email:rec.email||'',
+    approvedBy:rec.approvedBy||'', grantedAt:rec.grantedAt||0, grantedBy:rec.grantedBy||'', status, endDate:range ? range.end : '', archivedAt:Date.now(), archivedBy:by };
+  rec.pass = 'NO'; rec.date = ''; rec.email = ''; rec.approvedBy = ''; rec.grantedAt = 0; rec.grantedBy = '';
+}
+// A pass whose end date is over becomes "Completed" in the history and the agent goes back to NO.
+function rolloverWfhPasses(){
+  let n = 0; const today = localIso();
+  Object.keys(STATE.wfhPasses||{}).forEach(c=>Object.values(STATE.wfhPasses[c]||{}).forEach(rec=>{
+    if(!isActivePass(rec.pass)) return;
+    const r = parseWfhRange(rec.date, rec.email);
+    if(r && r.end < today){ archiveWfhPass(c, rec, 'completed', 'auto'); n++; }
+  }));
+  return n;
+}
+function lastWfhApprover(){
+  let best = '', t = 0;
+  Object.values(STATE.wfhPasses||{}).forEach(m=>Object.values(m).forEach(r=>{ if(r.approvedBy && (r.grantedAt||0) >= t){ t = r.grantedAt||0; best = r.approvedBy; } }));
+  return best;
+}
+const HIST_ICON = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>';
+function wfhNameCell(a, campaign){
+  const hist = a.rec ? wfhHistoryEntries(campaign, a.rec.id) : [];
+  const last = hist[0];
+  const lastTxt = last ? `<div class="status-sub">Last pass ${last.status==='cancelled'?'cancelled':'completed'}${last.endDate?` \u00b7 ${fmtShortDate(last.endDate)}`:''}</div>` : '';
+  return `<button type="button" class="name-link" data-wfh-history="${esc(a.id)}" data-campaign="${esc(campaign)}" title="View this agent\u2019s WFH pass history">${esc(a.name)}${hist.length?` <span class="count-pill" title="${hist.length} past pass${hist.length===1?'':'es'}">${HIST_ICON} ${hist.length}</span>`:''}</button>${a.roster?'':' <span class="match-tag firstname" title="Not on the Agent Roster in this campaign">not on roster</span>'}${lastTxt}`;
+}
+function wfhDateWarn(a){
+  if(!isActivePass(a.pass)) return '';
+  if(!String(a.date||'').trim()) return '<div class="status-sub need">Add the dates so it can complete by itself</div>';
+  return parseWfhRange(a.date, a.email) ? '' : '<div class="status-sub need">Can\u2019t read this date \u2014 use e.g. 10/26-10/30</div>';
+}
+function closeWfhModal(){ const o = document.getElementById('wfhHistoryModal'); if(o) o.remove(); }
+function openWfhHistory(campaign, rowId){
+  closeWfhModal();
+  const a = wfhRows(campaign).find(r=>r.id===rowId); if(!a) return;
+  const hist = a.rec ? wfhHistoryEntries(campaign, a.rec.id) : [];
+  const active = isActivePass(a.pass);
+  const lead = wfhLeadOf(a);
+  const stamp = (ms, by)=> ms ? `${esc(fmtStamp(ms))}${by?` <span class="muted">\u00b7 by ${esc(by)}</span>`:''}` : '<span class="muted">not recorded</span>';
+  const ov = document.createElement('div');
+  ov.className = 'modal-overlay'; ov.id = 'wfhHistoryModal';
+  ov.innerHTML = `<div class="modal wide">
+    <div class="modal-head"><div><h3 style="margin:0;">${esc(a.name)}</h3><div class="field-hint">${esc(campaign)}${lead?` \u00b7 Team lead ${esc(lead)}`:''}</div></div><button type="button" class="btn ghost sm" data-close>Close</button></div>
+    <div class="sec-title" style="margin-top:18px;">Current pass</div>
+    ${active ? `<div class="rec-line"><span class="chip new">${esc(a.pass)}</span> &nbsp;${esc(a.date||'no dates yet')}${a.email?` \u00b7 request received ${esc(a.email)}`:''}<br>
+        Approved by <strong>${esc(a.approvedBy||'\u2014')}</strong> \u00b7 recorded ${stamp(a.grantedAt, a.grantedBy)}</div>
+        <div class="btn-row"><button type="button" class="btn ghost sm" data-hist-complete>Mark completed now</button></div>`
+      : '<p class="field-hint" style="margin:0;">No active pass \u2014 currently <strong>NO</strong>.</p>'}
+    <div class="sec-title" style="margin-top:22px;">History <span class="count-pill">${hist.length}</span></div>
+    ${hist.length ? `<div style="overflow-x:auto;"><table class="hist-table"><thead><tr><th>Pass &amp; dates</th><th>Email request received</th><th>Approved by</th><th>Recorded (date &amp; time)</th><th>Result</th><th></th></tr></thead><tbody>
+      ${hist.map(e=>`<tr>
+        <td><span class="chip ${e.status==='cancelled'?'dup':'new'}">${esc(e.pass)}</span><div style="margin-top:4px;">${esc(e.date||'\u2014')}</div></td>
+        <td>${esc(e.email||'\u2014')}</td>
+        <td>${e.approvedBy?`<strong>${esc(e.approvedBy)}</strong>`:'<span class="muted">not recorded</span>'}</td>
+        <td>${stamp(e.grantedAt, e.grantedBy)}</td>
+        <td><span class="chip ${e.status==='cancelled'?'warn':'new'}">${e.status==='cancelled'?'Cancelled':'Completed'}</span><div class="status-sub">${e.archivedBy==='auto'?'Closed automatically':'Closed'} ${esc(fmtStamp(e.archivedAt))}${e.archivedBy && e.archivedBy!=='auto' ? ` by ${esc(e.archivedBy)}` : ''}</div></td>
+        <td style="text-align:right;"><button type="button" class="note-del" data-hist-del="${esc(e.id)}" title="Delete this entry (e.g. added by mistake)">Delete</button></td>
+      </tr>`).join('')}</tbody></table></div>`
+      : '<p class="field-hint" style="margin:6px 0 0;">No past passes yet. When a pass\u2019s dates are over it is saved here as completed and the agent goes back to NO.</p>'}
+  </div>`;
+  document.body.appendChild(ov);
+  const reopen = ()=>{ render(); openWfhHistory(campaign, rowId); };
+  ov.addEventListener('click', e=>{ if(e.target===ov) closeWfhModal(); });
+  ov.addEventListener('keydown', e=>{ if(e.key==='Escape') closeWfhModal(); });
+  ov.querySelector('[data-close]').addEventListener('click', closeWfhModal);
+  const cb = ov.querySelector('[data-hist-complete]');
+  if(cb) cb.addEventListener('click', async ()=>{
+    const by = await ensureUserName(); if(!by || !a.rec) return;
+    archiveWfhPass(campaign, a.rec, 'completed', by);
+    const ok = await saveState(); closeWfhModal(); render();
+    if(ok){ toast('Saved to history as completed'); openWfhHistory(campaign, rowId); }
+  });
+  ov.querySelectorAll('[data-hist-del]').forEach(b=>b.addEventListener('click', async ()=>{
+    if(!confirm('Delete this history entry? It can\u2019t be undone.')) return;
+    const key = campaign+'|'+a.rec.id;
+    delete STATE.wfhHistory[key][b.dataset.histDel];
+    if(!Object.keys(STATE.wfhHistory[key]).length) delete STATE.wfhHistory[key];
+    const ok = await saveState(); closeWfhModal(); render();
+    if(ok){ toast('History entry deleted'); openWfhHistory(campaign, rowId); }
+  }));
+  ov.focus();
+}
+
 function wfhRows(campaign){
   const stored = wfhList(campaign);
   const roster = (STATE.agentRoster||[]).filter(a=>a.campaign===campaign);
@@ -2768,9 +2934,9 @@ function wfhRows(campaign){
     const m = computeRosterMatch(rec.name, roster.filter(a=>!claimed.has(a.id)));
     if(m && m.how!=='firstname'){ claimed.add(m.agent.id); link.set(rec.id, m.agent); }
   });
-  const rows = stored.map(rec=>{ const ra = link.get(rec.id) || null; return { id:rec.id, rec, roster:ra, name:ra ? ra.name : rec.name, pass:rec.pass, date:rec.date||'', email:rec.email||'', ord:rec.ord||0 }; });
+  const rows = stored.map(rec=>{ const ra = link.get(rec.id) || null; return { id:rec.id, rec, roster:ra, name:ra ? ra.name : rec.name, pass:rec.pass, date:rec.date||'', email:rec.email||'', approvedBy:rec.approvedBy||'', grantedAt:rec.grantedAt||0, grantedBy:rec.grantedBy||'', ord:rec.ord||0 }; });
   roster.filter(a=>!claimed.has(a.id)).sort((a,b)=>a.name.localeCompare(b.name)).forEach(a=>{
-    rows.push({ id:'r_'+a.id, rec:null, roster:a, name:a.name, pass:'NO', date:'', email:'', ord:1e6 });
+    rows.push({ id:'r_'+a.id, rec:null, roster:a, name:a.name, pass:'NO', date:'', email:'', approvedBy:'', grantedAt:0, grantedBy:'', ord:1e6 });
   });
   return rows.sort((a,b)=>(a.ord-b.ord) || a.name.localeCompare(b.name));
 }
@@ -2819,9 +2985,13 @@ async function applyWfhUpload(rows, campaign, fileName){
   const byKey = new Map(); let fileDup = 0;
   rows.forEach(r=>{ const k = rosterKeyFromName(r.name); if(!k) return; if(byKey.has(k)){ fileDup++; return; } byKey.set(k, r); });
   const list = wfhList(campaign);
+  const today = localIso();
   let added=0, updated=0, dupExisting=0, ord = nextWfhOrd(campaign);
   byKey.forEach((r,k)=>{
     const ex = list.find(a=>rosterKeyFromName(a.name)===k);
+    const range = parseWfhRange(r.date, r.email);
+    const past = isActivePass(r.pass) && range && range.end < today;          // already over -> belongs in the history
+    if(past && ex && ((STATE.wfhHistory||{})[campaign+'|'+ex.id]||{})[wfhHistoryId({ pass:r.pass, date:r.date, email:r.email, grantedAt:'' })]){ dupExisting++; return; }
     if(!ex){
       const id = wfhKey(r.name);
       STATE.wfhPasses[campaign][id] = { id, name:r.name, pass:r.pass, date:r.date, email:r.email, ord:ord++, createdAt:Date.now() };
@@ -2830,6 +3000,7 @@ async function applyWfhUpload(rows, campaign, fileName){
     if(ex.pass===r.pass && (ex.date||'')===r.date && (ex.email||'')===r.email){ dupExisting++; return; }
     ex.pass = r.pass; ex.date = r.date; ex.email = r.email; updated++;
   });
+  rolloverWfhPasses();
   await saveState();
   return { campaign, fileName, total:byKey.size, added, updated, duplicates:dupExisting+fileDup };
 }
@@ -2878,10 +3049,11 @@ function renderWfhTab(){
       <td class="num">${st ? (st.count ? `<span class="badge ${st.count>=2?'amber':'neutral'}">${st.count}</span>` : '<span class="zero">0</span>') : dash}</td>
       <td class="num">${st ? st.totalMinutes : dash}</td>`;
     return `<tr data-wfh-row data-wfh-search="${esc(a.name.toLowerCase())}">
-      <td class="emp-name">${esc(a.name)}${a.roster?'':' <span class="match-tag firstname" title="Not on the Agent Roster in this campaign \u2014 add them in Settings \u2192 Agent Roster to link">not on roster</span>'}</td><td>${lead}</td>
+      <td class="emp-name">${wfhNameCell(a, wfhCampaignView)}</td><td>${lead}</td>
       <td>${passSelect(a, wfhCampaignView)}</td>
-      <td>${wfhInput(a, wfhCampaignView, 'date', 'e.g. 10/26-10/30')}</td>
+      <td>${wfhInput(a, wfhCampaignView, 'date', 'e.g. 10/26-10/30')}${wfhDateWarn(a)}</td>
       <td>${wfhInput(a, wfhCampaignView, 'email', 'e.g. Sun 10/25/2026 11:54 PM')}</td>
+      <td>${wfhInput(a, wfhCampaignView, 'approvedBy', 'Approver')}</td>
       ${statCells}
     </tr>`;
   }).join('');
@@ -2894,10 +3066,10 @@ function renderWfhTab(){
       <div class="trend-filters">
         <div class="field"><label class="field-label">Team Lead</label><select id="wfhLeadSel"><option value="">All Team Leads</option>${leads.map(t=>`<option value="${esc(t)}" ${t===wfhLeadFilter?'selected':''}>${esc(t)}</option>`).join('')}${all.some(r=>!wfhLeadOf(r))?`<option value="__none__" ${wfhLeadFilter==='__none__'?'selected':''}>No team lead / not on roster</option>`:''}</select></div>
         <div class="field"><label class="field-label">Search</label><input type="text" id="wfhSearch" value="${esc(wfhSearchTerm)}" placeholder="Agent name\u2026"></div>
-        <p class="field-hint" style="margin:0 0 18px 8px; align-self:flex-end;">Present, Absences, Late and Minutes are for <strong>${esc(monthLabel(currentMonth))}</strong> \u2014 change the month at the top. Agents on the Agent Roster appear here automatically. Manage extras in <button type="button" class="linkbtn" data-goto="settings" data-goto-tab="wfh">Settings \u2192 WFH Pass</button>.</p>
+        <p class="field-hint" style="margin:0 0 18px 8px; align-self:flex-end;">Present, Absences, Late and Minutes are for <strong>${esc(monthLabel(currentMonth))}</strong> \u2014 change the month at the top. Click an agent\u2019s name to see their pass history \u2014 when a pass\u2019s dates are over it is saved there as completed and the agent resets to NO. Add or remove names in <button type="button" class="linkbtn" data-goto="settings" data-goto-tab="wfh">Settings \u2192 WFH Pass</button>.</p>
       </div>
       ${list.length ? `<div class="trend-scroll"><table class="wfh-table">
-        <thead><tr><th>Agent</th><th>Team Lead</th><th style="width:190px">WFH Pass</th><th style="width:150px">Date</th><th style="width:240px">Email request received</th><th class="num">Present</th><th class="num">Absences</th><th class="num">Late</th><th class="num">Minutes late</th></tr></thead>
+        <thead><tr><th>Agent</th><th>Team Lead</th><th style="width:190px">WFH Pass</th><th style="width:150px">Date</th><th style="width:230px">Email request received</th><th style="width:150px">Approved by</th><th class="num">Present</th><th class="num">Absences</th><th class="num">Late</th><th class="num">Minutes late</th></tr></thead>
         <tbody>${rows}</tbody></table></div>
         <p class="field-hint" id="wfhSearchEmpty" style="display:none;">No agents match that search.</p>`
       : `<p class="field-hint">${wfhLeadFilter?'No agents match this team lead.':`No agents in ${esc(wfhCampaignView)} yet \u2014 add them to the Agent Roster or in Settings \u2192 WFH Pass.`}</p>`}
@@ -2934,17 +3106,17 @@ function renderWfhSettings(){
     const list = wfhRows(c);
     const fromRoster = (STATE.agentRoster||[]).some(a=>a.campaign===c);
     const rows = list.map(a=>{
-      const common = `<td>${passSelect(a,c)}</td><td>${wfhInput(a,c,'date','e.g. 10/26-10/30')}</td><td>${wfhInput(a,c,'email','e.g. Sun 10/25/2026 11:54 PM')}</td>`;
-      if(a.roster) return `<tr><td><div class="wfh-linked"><span>${esc(a.name)}</span><span class="chip new" title="This agent comes from the Agent Roster \u2014 add or remove them there">From Roster</span></div></td>${common}<td></td></tr>`;
+      const common = `<td>${passSelect(a,c)}</td><td>${wfhInput(a,c,'date','e.g. 10/26-10/30')}${wfhDateWarn(a)}</td><td>${wfhInput(a,c,'email','e.g. Sun 10/25/2026 11:54 PM')}</td><td>${wfhInput(a,c,'approvedBy','Approver')}</td>`;
+      if(a.roster) return `<tr><td><div class="wfh-linked"><span>${wfhNameCell(a,c)}</span><span class="chip new" title="This agent comes from the Agent Roster \u2014 add or remove them there">From Roster</span></div></td>${common}<td></td></tr>`;
       return `<tr><td><input type="text" class="wfh-name-edit" data-campaign="${esc(c)}" data-id="${esc(a.id)}" value="${esc(a.name)}"></td>${common}
       <td style="text-align:right;"><button type="button" class="icon-btn danger" title="Remove ${esc(a.name)}" data-wfh-remove="${esc(a.id)}" data-campaign="${esc(c)}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg></button></td></tr>`;
     }).join('');
     return `<div class="card" style="margin-bottom:20px;">
       <div class="card-header"><h3>${esc(c)}</h3><div style="display:flex; gap:10px; align-items:center;"><span class="chip dup">${list.length} agent${list.length===1?'':'s'}</span>${fromRoster?'<span class="chip new" title="This campaign exists on the Agent Roster, so it can\u2019t be removed here">Linked to Roster</span>':`<button type="button" class="btn ghost sm danger-text" data-wfh-remove-campaign="${esc(c)}">Remove campaign</button>`}</div></div>
       <div class="card-body"><div class="trend-scroll"><table class="wfh-table">
-        <thead><tr><th>Agent</th><th style="width:190px">WFH Pass</th><th style="width:150px">Date</th><th style="width:240px">Email request received</th><th style="width:50px"></th></tr></thead>
+        <thead><tr><th>Agent</th><th style="width:190px">WFH Pass</th><th style="width:150px">Date</th><th style="width:230px">Email request received</th><th style="width:150px">Approved by</th><th style="width:50px"></th></tr></thead>
         <tbody>${rows}
-          <tr class="wfh-new-row"><td colspan="5"><form class="wfh-add-form" data-campaign="${esc(c)}" style="display:flex; gap:10px;">
+          <tr class="wfh-new-row"><td colspan="6"><form class="wfh-add-form" data-campaign="${esc(c)}" style="display:flex; gap:10px;">
             <input type="text" class="wfh-new-name" data-campaign="${esc(c)}" list="wfhNameList" placeholder="Type a name and press Enter to add (agents already on the Roster appear above automatically)\u2026" autocomplete="off">
             <button type="submit" class="btn brass sm">Add</button></form></td></tr>
         </tbody></table></div></div></div>`;
@@ -2971,27 +3143,54 @@ function attachWfhHandlers(){
   if(search){ search.addEventListener('input', ()=>{ wfhSearchTerm = search.value; applySearch(); }); if(wfhSearchTerm) applySearch(); }
 
   // edit pass / date / email (saves as you go; no re-render so you can tab through the cells)
+  document.querySelectorAll('[data-wfh-history]').forEach(b=>b.addEventListener('click', ()=>openWfhHistory(b.dataset.campaign, b.dataset.wfhHistory)));
   document.querySelectorAll('.wfh-edit').forEach(inp=>inp.addEventListener('change', async ()=>{
-    const campaign = inp.dataset.campaign; let id = inp.dataset.id;
+    const campaign = inp.dataset.campaign, id = inp.dataset.id, field = inp.dataset.field;
     STATE.wfhPasses = STATE.wfhPasses || {};
     let rec = (STATE.wfhPasses[campaign]||{})[id];
+    const tr = inp.closest('tr');
+    const setRow = (f, v)=>{ const el = tr && tr.querySelector(`.wfh-edit[data-field="${f}"]`); if(el) el.value = v; };
     if(!rec && id.startsWith('r_')){                      // a roster agent edited for the first time -> create their pass record
       const ra = (STATE.agentRoster||[]).find(a=>a.id===id.slice(2));
       if(!ra) return;
       ensureWfhCampaign(campaign);
       const nid = wfhKey(ra.name);
       rec = STATE.wfhPasses[campaign][nid] = STATE.wfhPasses[campaign][nid] || { id:nid, name:ra.name, pass:'NO', date:'', email:'', ord:nextWfhOrd(campaign), createdAt:Date.now() };
-      const tr = inp.closest('tr'); if(tr) tr.querySelectorAll('.wfh-edit').forEach(x=>{ x.dataset.id = nid; });
+      if(tr) tr.querySelectorAll('.wfh-edit').forEach(x=>{ x.dataset.id = nid; });
     }
     if(!rec) return;
-    rec[inp.dataset.field] = inp.value.trim();
-    if(inp.dataset.field==='pass'){
-      inp.dataset.pass = isActivePass(rec.pass) ? 'yes' : 'no';
-      const c = document.getElementById('wfhActiveCount');
-      if(c) c.textContent = document.querySelectorAll('tr[data-wfh-row] select[data-pass="yes"]').length + ' with a pass';
+    const val = inp.value.trim();
+    let archived = false;
+    if(field==='pass'){
+      const was = rec.pass;
+      if(isActivePass(val) && !isActivePass(was)){                    // a pass is being granted -> record who approved it
+        const by = await ensureUserName(); if(!by){ inp.value = was; return; }
+        const who = await askText('Who approved this WFH pass?', 'Approved by', rec.approvedBy || lastWfhApprover(), `Saved with today\u2019s date and time, under your name (${by}).`);
+        if(!who){ inp.value = was; return; }
+        rec.pass = val; rec.approvedBy = who.trim(); rec.grantedAt = Date.now(); rec.grantedBy = by;
+        setRow('approvedBy', rec.approvedBy);
+      } else if(!isActivePass(val) && isActivePass(was)){             // cancelled early -> keep it in the history
+        if(!confirm(`Cancel ${rec.name}\u2019s WFH pass? It will be saved to their history as cancelled and the agent goes back to NO.`)){ inp.value = was; return; }
+        archiveWfhPass(campaign, rec, 'cancelled', currentUserName() || 'Someone'); archived = true;
+        ['pass','date','email','approvedBy'].forEach(f=>setRow(f, f==='pass' ? 'NO' : ''));
+      } else rec.pass = val;
+    } else {
+      rec[field] = val;
+      if((field==='date' || field==='email') && isActivePass(rec.pass)){
+        const r = parseWfhRange(rec.date, rec.email);
+        if(r && r.end < localIso()){                                  // the dates are already over -> completed
+          archiveWfhPass(campaign, rec, 'completed', currentUserName() || 'Someone'); archived = true;
+          ['pass','date','email','approvedBy'].forEach(f=>setRow(f, f==='pass' ? 'NO' : ''));
+          toast('Those dates are already over \u2014 saved to the history as completed.');
+        }
+      }
     }
+    const sel = tr && tr.querySelector('select[data-field="pass"]'); if(sel) sel.dataset.pass = isActivePass(rec.pass) ? 'yes' : 'no';
+    const c = document.getElementById('wfhActiveCount');
+    if(c) c.textContent = document.querySelectorAll('tr[data-wfh-row] select[data-pass="yes"]').length + ' with a pass';
     const ok = await saveState();
-    if(ok) toast('Saved'); else toastRetry('Saved here, but the sync failed \u2014 tap to retry.');
+    if(ok){ if(!archived) toast('Saved'); } else toastRetry('Saved here, but the sync failed \u2014 tap to retry.');
+    if(archived || field==='pass') render();
   }));
 
   // Settings
@@ -3040,6 +3239,7 @@ function attachWfhHandlers(){
     const campaign = b.dataset.campaign, rec = ((STATE.wfhPasses||{})[campaign]||{})[b.dataset.wfhRemove];
     if(!rec || !confirm(`Remove ${rec.name} from the ${campaign} WFH PASS list?`)) return;
     delete STATE.wfhPasses[campaign][rec.id];
+    delete (STATE.wfhHistory||{})[campaign+'|'+rec.id];
     render(); const ok = await saveState();
     if(ok) toast('Removed'); else toastRetry('Removed here, but the save failed \u2014 tap to retry.');
   }));
@@ -3048,6 +3248,7 @@ function attachWfhHandlers(){
     if(!confirm(`Remove the whole ${c} campaign${n?` and its ${n} agent${n===1?'':'s'}`:''} from WFH PASS?\n\nThis can\u2019t be undone.`)) return;
     STATE.wfhCampaigns = (STATE.wfhCampaigns||[]).filter(x=>x!==c);
     delete (STATE.wfhPasses||{})[c];
+    Object.keys(STATE.wfhHistory||{}).forEach(k=>{ if(k.startsWith(c+'|')) delete STATE.wfhHistory[k]; });
     if(wfhCampaignView===c) wfhCampaignView = '';
     render(); const ok = await saveState();
     if(ok) toast('Campaign removed'); else toastRetry('Removed here, but the save failed \u2014 tap to retry.');
@@ -3101,7 +3302,8 @@ function renderAttendanceImport(){
 }
 function renderAttendanceSummaryCard(){
   const meta = STATE.attendanceUploadMeta;
-  const summary = attendanceSummaryByEmployee(currentMonth);
+  const allSummary = attendanceSummaryByEmployee(currentMonth);
+  const summary = allSummary.filter(e=>summaryLeadMatch(e.empName, summaryLeadFilter.attendance));
 
   const rows = summary.map(emp=>{
     const streakBadge = emp.longestStreak>=3 ? 'red' : (emp.longestStreak===2 ? 'amber' : 'neutral');
@@ -3117,8 +3319,9 @@ function renderAttendanceSummaryCard(){
           }).join('')}
         </div>
       </details>` : '<span style="color:var(--slate-soft);">\u2014</span>';
-    return `<tr data-attendance-row data-attendance-search="${esc(toTitleCaseName(emp.empName).toLowerCase())}">
+    return `<tr data-summary-row data-summary-search="${esc(toTitleCaseName(emp.empName).toLowerCase())}">
       <td style="font-weight:600;">${esc(toTitleCaseName(emp.empName))}</td>
+      <td>${teamLeadCellHtml(emp)}</td>
       <td class="num">${emp.present}</td>
       <td class="num">${emp.restday}</td>
       <td class="num">${emp.vl}</td>
@@ -3136,16 +3339,14 @@ function renderAttendanceSummaryCard(){
       <span style="font-size:11.5px; color:var(--slate-soft);">${monthLabel(currentMonth)} &middot; use the Month selector at the top to change it</span>
     </div>
     <div class="card-body">
-      <div class="field" style="max-width:320px;">
-        <label class="field-label">Search by Agent Name</label>
-        <input type="text" id="attendanceSearchInput" placeholder="Start typing an agent\u2019s name\u2026">
-      </div>
+      ${summaryFilterBar('attendance')}
       <div style="overflow-x:auto;">
-      ${summary.length ? `
+      ${allSummary.length ? `
       <table id="attendanceTable">
-        <thead><tr><th>Employee</th><th>Present</th><th>Rest Day</th><th>Vacation Leave</th><th>Emergency Leave</th><th>Absences</th><th>Longest Streak</th><th>Absence Dates</th></tr></thead>
+        <thead><tr><th>Employee</th><th>Team Lead</th><th>Present</th><th>Rest Day</th><th>Vacation Leave</th><th>Emergency Leave</th><th>Absences</th><th>Longest Streak</th><th>Absence Dates</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
+      ${summary.length ? '' : '<p class="field-hint">No agents for this team lead in this month.</p>'}
       <p class="field-hint" id="attendanceSearchEmpty" style="display:none;">No agents match that search.</p>
       <p class="field-hint" style="margin-top:14px;">\u201cAbsences\u201d is strictly \u201cAbsent\u201d and \u201cSick Leave\u201d remarks \u2014 \u201cNo Login\u201d is excluded. It also counts occurrences, not raw days: a run of consecutive Absent/Sick Leave days counts as 1. A Rest Day in between doesn\u2019t break the streak (e.g. Sick Leave \u2192 Rest Day \u2192 Absent still counts as 1 occurrence), but a Present or Vacation Leave day in between does \u2014 that starts a new, separate occurrence. \u201cLongest Streak\u201d is the longest single run, in days.</p>
       ` : emptyState('No attendance data for this month', meta ? `Nothing in the uploaded file falls in ${monthLabel(currentMonth)} \u2014 try a different month above.` : 'Upload an attendance file in Settings to see the monthly breakdown.', null, null)}
@@ -3180,7 +3381,8 @@ function renderTardiness(){
   return `${banner}${tabBar}${tabContent}`;
 }
 function renderTardinessSummaryCard(){
-  const summary = tardinessSummaryByEmployee(currentMonth);
+  const allSummary = tardinessSummaryByEmployee(currentMonth);
+  const summary = allSummary.filter(e=>summaryLeadMatch(e.empName, summaryLeadFilter.tardiness));
   const summaryRows = summary.map(emp=>{
     const longestBadge = emp.longestMinutes>10 ? 'red' : (emp.longestMinutes>0 ? 'amber' : 'neutral');
     const detail = emp.instances.length ? `
@@ -3190,8 +3392,9 @@ function renderTardinessSummaryCard(){
           ${emp.instances.map(i=>`<span class="badge ${i.minutes>10?'red':'amber'}">${esc(fmtDate(i.date))} (${i.minutes} min)</span>`).join('')}
         </div>
       </details>` : '<span style="color:var(--slate-soft);">\u2014</span>';
-    return `<tr>
+    return `<tr data-summary-row data-summary-search="${esc(toTitleCaseName(emp.empName).toLowerCase())}">
       <td style="font-weight:600;">${esc(toTitleCaseName(emp.empName))}</td>
+      <td>${teamLeadCellHtml(emp)}</td>
       <td class="num">${emp.count ? `<span class="badge ${emp.count>=2?'amber':'neutral'}">${emp.count}</span>` : '<span style="color:var(--slate-soft);">0</span>'}</td>
       <td class="num">${emp.totalMinutes || '<span style="color:var(--slate-soft);">0</span>'}</td>
       <td class="num"><span class="badge ${longestBadge}">${emp.longestMinutes || 0} min</span></td>
@@ -3205,14 +3408,19 @@ function renderTardinessSummaryCard(){
       <h3>Monthly Tardiness Summary</h3>
       <span style="font-size:11.5px; color:var(--slate-soft);">${monthLabel(currentMonth)} &middot; based on SchedIn vs TimeIn in the uploaded attendance file</span>
     </div>
-    <div class="card-body" style="overflow-x:auto;">
-      ${summary.length ? `
-      <table>
-        <thead><tr><th>Employee</th><th>Late Instances</th><th>Total Minutes Late</th><th>Longest Lateness</th><th>Late Dates</th></tr></thead>
+    <div class="card-body">
+      ${summaryFilterBar('tardiness')}
+      <div style="overflow-x:auto;">
+      ${allSummary.length ? `
+      <table id="tardinessTable">
+        <thead><tr><th>Employee</th><th>Team Lead</th><th>Late Instances</th><th>Total Minutes Late</th><th>Longest Lateness</th><th>Late Dates</th></tr></thead>
         <tbody>${summaryRows}</tbody>
       </table>
+      ${summary.length ? '' : '<p class="field-hint">No agents for this team lead in this month.</p>'}
+      <p class="field-hint" id="tardinessSearchEmpty" style="display:none;">No agents match that search.</p>
       <p class="field-hint" style="margin-top:14px;">A day counts as a tardiness instance only when its Remarks says "Late" (e.g. "Present-Late") and isn\u2019t a Holiday remark \u2014 the minutes shown are then the SchedIn-to-TimeIn difference for that day.</p>
       ` : emptyState('No tardiness on file for this month', 'Either nobody was late, or the uploaded file has no SchedIn/TimeIn columns \u2014 try a different month above, or upload a file in Settings.', null, null)}
+      </div>
     </div>
   </div>
   `;
@@ -3283,21 +3491,6 @@ function attachViewHandlers(){
         lastAttendanceResult = null;
         render();
         toast('Attendance data cleared');
-      });
-    }
-    const attSearch = document.getElementById('attendanceSearchInput');
-    if(attSearch){
-      attSearch.addEventListener('input', ()=>{
-        const term = attSearch.value.trim().toLowerCase();
-        const tableRows = document.querySelectorAll('#attendanceTable tbody tr[data-attendance-row]');
-        let visibleCount = 0;
-        tableRows.forEach(row=>{
-          const matches = !term || (row.dataset.attendanceSearch||'').includes(term);
-          row.style.display = matches ? '' : 'none';
-          if(matches) visibleCount++;
-        });
-        const emptyMsg = document.getElementById('attendanceSearchEmpty');
-        if(emptyMsg) emptyMsg.style.display = visibleCount===0 ? 'block' : 'none';
       });
     }
   }
