@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">  
+<html lang="en">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -555,7 +555,28 @@ async function fbConnect(cfg){
 
 /* ---- optional sign-in (turn on with requireSignIn in firebase-config.js) ---- */
 function authUserLabel(u){ return (u && (u.displayName || (u.email||'').split('@')[0])) || ''; }
-function afterSignIn(u){ FB.user = u; setUserName(authUserLabel(u)); }
+function afterSignIn(u){ FB.user = u; setUserName(authUserLabel(u)); startSessionWatch(); }
+/* If an administrator disables or deletes someone in Firebase, that person's open page stops working within minutes
+   (Firebase itself lets an already-open session run until its token expires, up to an hour). */
+let sessionWatchOn = false;
+async function endSession(){ try{ await firebase.auth().signOut(); }catch(e){} location.reload(); }
+async function checkSession(){
+  try{
+    const u = firebase.auth().currentUser;
+    if(!u) return endSession();
+    await u.getIdToken(true);                          // asks Firebase for a fresh token; refused when the account is disabled / deleted
+  }catch(e){
+    if(/user-disabled|user-not-found|user-token-expired|invalid-user-token|id-token-revoked|invalid-credential/.test((e && e.code) || '')) endSession();
+  }                                                    // (offline / network errors are ignored)
+}
+function startSessionWatch(){
+  if(sessionWatchOn || !REQUIRE_SIGN_IN) return;
+  sessionWatchOn = true;
+  setInterval(checkSession, 2*60*1000);
+  document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) checkSession(); });
+  window.addEventListener('online', checkSession);
+  try{ firebase.auth().onAuthStateChanged(u=>{ if(!u) endSession(); }); }catch(e){}
+}
 async function ensureSignedIn(){
   const auth = firebase.auth();
   const existing = await new Promise(res=>{ const off = auth.onAuthStateChanged(u=>{ off(); res(u); }); });
@@ -568,7 +589,7 @@ async function ensureSignedIn(){
       <label class="field-label">Email</label><input type="email" id="siEmail" autocomplete="username" required>
       <label class="field-label" style="margin-top:12px; display:block;">Password</label><input type="password" id="siPass" autocomplete="current-password" required>
       <p class="field-hint" id="siMsg" style="margin:10px 0 0; color:var(--red); min-height:18px;"></p>
-      <div class="modal-actions"><button type="button" class="btn ghost" id="siReset">Forgot password</button><button type="submit" class="btn brass" id="siGo">Sign in</button></div></form>`;
+      <div class="modal-actions" style="align-items:center;"><span class="field-hint" style="margin:0 auto 0 0;">Need access or a new password?<br>Ask your administrator.</span><button type="submit" class="btn brass" id="siGo" style="white-space:nowrap;">Sign in</button></div></form>`;
     document.body.appendChild(ov);
     const msg = ov.querySelector('#siMsg'), email = ov.querySelector('#siEmail');
     email.focus();
@@ -580,11 +601,6 @@ async function ensureSignedIn(){
         ov.remove(); if(loading) loading.style.display = 'flex';
         afterSignIn(cred.user); resolve(cred.user);
       }catch(e){ msg.style.color = 'var(--red)'; msg.textContent = nice(e); }
-    });
-    ov.querySelector('#siReset').addEventListener('click', async ()=>{
-      if(!email.value.trim()){ msg.style.color = 'var(--red)'; msg.textContent = 'Type your email first.'; return; }
-      try{ await auth.sendPasswordResetEmail(email.value.trim()); msg.style.color = 'var(--slate)'; msg.textContent = 'Password reset email sent.'; }
-      catch(e){ msg.style.color = 'var(--red)'; msg.textContent = nice(e); }
     });
   });
 }
